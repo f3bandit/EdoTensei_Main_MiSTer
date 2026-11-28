@@ -85,6 +85,8 @@ enum MENU
 	MENU_COMMON2,
 	MENU_MISC1,
 	MENU_MISC2,
+	MENU_INI_LIST1,
+	MENU_INI_LIST2,
 
 	MENU_SELECT_INI1,
 	MENU_SELECT_INI2,
@@ -159,6 +161,8 @@ enum MENU
 	MENU_UART2,
 	MENU_UART3,
 	MENU_UART4,
+	MENU_MT32PI_CTRL1,
+	MENU_MT32PI_CTRL2,
 	MENU_BAUD1,
 	MENU_BAUD2,
 
@@ -255,6 +259,11 @@ enum MENU
 };
 
 static uint32_t menustate = MENU_NONE1;
+
+static uint8_t mt32pi_rom = 0;
+static uint8_t mt32pi_soundfont = 0;
+static uint8_t mt32pi_reversed_stereo = 0;
+
 static uint32_t parentstate;
 static uint32_t menusub = 0;
 static uint32_t menusub_last = 0; //for when we allocate it dynamically and need to know last row
@@ -574,6 +583,64 @@ static uint8_t GetASCIIKey(uint32_t keycode)
 
 static bool ignore_osd_release = false;
 static int select_ini = 0;
+static int ini_keep_sub = 0;
+static int ini_list[CFG_ALT_MAX + 1];
+static int ini_list_num = 0;
+static int ini_list_sel = 0;
+static int ini_list_first = 0;
+
+static const char *ini_display_name(int alt)
+{
+	if (!alt) return "Main";
+	const char *name = cfg_get_short_name(alt);
+	return (name[0] == '_') ? name + 1 : name;
+}
+
+static void ini_list_init()
+{
+	int act = altcfg();
+	ini_list_num = 0;
+	ini_list_sel = 0;
+	for (int i = 0; i < cfg_get_count(); i++)
+	{
+		if (!cfg_get_name(i)[0]) continue;
+		if (i == act) ini_list_sel = ini_list_num;
+		ini_list[ini_list_num++] = i;
+	}
+
+	ini_list_first = ini_list_sel - OsdGetSize() + 1;
+	if (ini_list_first < 0) ini_list_first = 0;
+}
+
+static void ini_list_move(int step)
+{
+	int size = OsdGetSize();
+	ini_list_sel += step;
+	if (ini_list_sel < 0) ini_list_sel = (step == -1) ? ini_list_num - 1 : 0;
+	if (ini_list_sel >= ini_list_num) ini_list_sel = (step == 1) ? 0 : ini_list_num - 1;
+	if (ini_list_sel < ini_list_first) ini_list_first = ini_list_sel;
+	if (ini_list_sel > ini_list_first + size - 1) ini_list_first = ini_list_sel - size + 1;
+}
+
+static void ini_list_print()
+{
+	static char s[64];
+	int size = OsdGetSize();
+	for (int i = 0; i < size; i++)
+	{
+		int k = ini_list_first + i;
+		char leftchar = 0;
+		if (k < ini_list_num)
+		{
+			snprintf(s, 30, " %s", ini_display_name(ini_list[k]));
+			if (!i && k) leftchar = 17;
+			if (i == size - 1 && k < ini_list_num - 1) leftchar = 16;
+		}
+		else s[0] = 0;
+
+		OsdWriteOffset(i, s, k == ini_list_sel, 0, 0, leftchar);
+	}
+}
 
 void SelectINI()
 {
@@ -1275,7 +1342,6 @@ void HandleUI(void)
 	static int helptext_idx = 0;
 	static int helptext_idx_old = 0;
 	static char helpstate = 0;
-	static char flag;
 	static int cr = 0;
 	static uint32_t cheatsub = 0;
 	static uint8_t card_cid[32];
@@ -2812,12 +2878,6 @@ void HandleUI(void)
 								}
 								else
 								{
-									if (!bit && is_uneon())
-									{
-										x86_ide_set();
-										menustate = MENU_NONE1;
-									}
-
 									if (is_megacd())
 									{
 										if (!bit) mcd_set_image(0, "");
@@ -2914,6 +2974,8 @@ void HandleUI(void)
 
 				if (fs_Options & SCANO_NEOGEO)
 				{
+					// Store the filename after the set.
+					if (!store_name) user_io_store_filename(selPath);
 					neocd_set_en(0);
 					neogeo_romset_tx(selPath, 0);
 				}
@@ -3041,10 +3103,13 @@ void HandleUI(void)
 			memcpy(Selected_S[(int)ioctl_index], selPath, sizeof(Selected_S[(int)ioctl_index]));
 			if (mgl->done) recent_update(SelectedDir, Selected_S[(int)ioctl_index], SelectedLabel, ioctl_index + 500);
 
+			// The last image mounted names screenshots, except for saves files or SC/FC slots.
+			if (selPath[0] && !store_name && !(fs_Options & SCANO_SAVES)) user_io_store_filename(selPath);
+
 			char idx = user_io_ext_idx(selPath, fs_pFileExt) << 6 | ioctl_index;
 			if (addon[0] == 'f' && addon[1] != '1') process_addon(addon, idx);
 
-			else if (is_x86() || is_pcxt() || is_pcat286() || (is_uneon() && idx >= 2))
+			else if (is_x86() || is_pcxt() || is_pcat286())
 			{
 				x86_set_image(ioctl_index, selPath);
 			}
@@ -3869,7 +3934,12 @@ void HandleUI(void)
 				sprintf(s, " MidiLink:             %s", config_midilink_mode[midilink]);
 				OsdWrite(m++, s, menusub == 2);
 
-				if (midilink < 2)
+				if (midilink == 2)
+				{
+					OsdWrite(m++, " mt32-pi Control          \x16", menusub == 3);
+					menumask |= 0x08;
+				}
+				else if (midilink < 2)
 				{
 					sprintf(s, " Type:                %s", midilink ? "  MUNT" : "FSYNTH");
 					OsdWrite(m++, s, menusub == 3);
@@ -3978,10 +4048,19 @@ void HandleUI(void)
 				{
 					int mode = GetUARTMode();
 					int midilink = GetMidiLinkMode();
-					SetUARTMode(0);
-					SetMidiLinkMode(midilink ? 0 : 1);
-					SetUARTMode(mode);
-					menustate = MENU_UART1;
+
+					if (mode == 3 && midilink == 2)
+					{
+						menusub = 0;
+						menustate = MENU_MT32PI_CTRL1;
+					}
+					else
+					{
+						SetUARTMode(0);
+						SetMidiLinkMode(midilink ? 0 : 1);
+						SetUARTMode(mode);
+						menustate = MENU_UART1;
+					}
 				}
 				break;
 
@@ -4022,6 +4101,7 @@ void HandleUI(void)
 					speeds[2] = GetUARTbaud(4);
 					sprintf(s, "uartspeed.%s", user_io_get_core_name());
 					FileSaveConfig(s, speeds, sizeof(speeds));
+					mt32pi_usb_save_synth();
 					menustate = MENU_COMMON1;
 					menusub = 6;
 				}
@@ -4029,6 +4109,162 @@ void HandleUI(void)
 
 			default:
 				menustate = MENU_NONE1;
+				break;
+			}
+		}
+		break;
+
+
+	case MENU_MT32PI_CTRL1:
+		{
+			static const char *synth_names[] =
+			{
+				"Munt",
+				"FluidSynth",
+				"Nuked-SC55",
+				"Nuked-MT32"
+			};
+
+			static const char *rom_names[] =
+			{
+				"MT-32 Old",
+				"MT-32 New",
+				"CM-32L"
+			};
+
+			helptext_idx = 0;
+
+			menumask = 0x41; // USB Control and Back
+			if (mt32pi_usb_enabled)
+			{
+				menumask |= 0x32; // Synth, stereo and reboot
+				if (mt32pi_usb_synth == 0) menumask |= 0x04;
+				if (mt32pi_usb_synth == 1) menumask |= 0x08;
+			}
+
+			OsdSetTitle("mt32-pi Control");
+			menustate = MENU_MT32PI_CTRL2;
+			parentstate = MENU_MT32PI_CTRL1;
+
+			m = 0;
+			OsdWrite(m++);
+
+			sprintf(s, " USB Control:         %s", mt32pi_usb_enabled ? "On" : "Off");
+			OsdWrite(m++, s, menusub == 0);
+
+			sprintf(s, " Synthesizer:   %s",
+				mt32pi_usb_synth < 4 ? synth_names[mt32pi_usb_synth] : "Not set");
+			OsdWrite(m++, s, menusub == 1, !mt32pi_usb_enabled);
+
+			sprintf(s, " Munt ROM:      %s",
+				rom_names[mt32pi_rom]);
+			OsdWrite(m++, s, menusub == 2,
+				!mt32pi_usb_enabled || mt32pi_usb_synth != 0);
+
+			sprintf(s, " SoundFont:          %02X",
+				mt32pi_soundfont);
+			OsdWrite(m++, s, menusub == 3,
+				!mt32pi_usb_enabled || mt32pi_usb_synth != 1);
+
+			sprintf(s, " Reversed Stereo:    %s",
+				mt32pi_reversed_stereo ? "On" : "Off");
+			OsdWrite(m++, s, menusub == 4, !mt32pi_usb_enabled);
+
+			OsdWrite(m++);
+			OsdWrite(m++, " Reboot mt32-pi", menusub == 5, !mt32pi_usb_enabled);
+
+			while (m < 15) OsdWrite(m++);
+			OsdWrite(15, STD_BACK, menusub == 6);
+		}
+		break;
+
+	case MENU_MT32PI_CTRL2:
+		if (menu || back || (select && menusub == 6))
+		{
+			menusub = 3;
+			menustate = MENU_UART1;
+		}
+		else if (select && menusub == 0)
+		{
+			mt32pi_usb_set_enabled(!mt32pi_usb_enabled);
+			menustate = MENU_MT32PI_CTRL1;
+		}
+		else if (mt32pi_usb_enabled && GetUARTMode() == 3 &&
+		         GetMidiLinkMode() == 2 && (select || plus || minus))
+		{
+			switch (menusub)
+			{
+			case 1:
+				mt32pi_usb_select_synth(minus);
+
+
+				menustate = MENU_MT32PI_CTRL1;
+				break;
+
+			case 2:
+				if (mt32pi_usb_synth == 0)
+				{
+					if (minus)
+					{
+						mt32pi_rom =
+							mt32pi_rom ?
+							mt32pi_rom - 1 : 2;
+					}
+					else
+					{
+						mt32pi_rom =
+							(mt32pi_rom + 1) % 3;
+					}
+
+					snprintf(s, sizeof(s),
+						"/sbin/mlinkutil SYSEX "
+						"F0 7D 01 %02X F7",
+						mt32pi_rom);
+					system(s);
+				}
+
+				menustate = MENU_MT32PI_CTRL1;
+				break;
+
+			case 3:
+				if (mt32pi_usb_synth == 1)
+				{
+					if (minus)
+						mt32pi_soundfont--;
+					else
+						mt32pi_soundfont++;
+
+					snprintf(s, sizeof(s),
+						"/sbin/mlinkutil SYSEX "
+						"F0 7D 02 %02X F7",
+						mt32pi_soundfont);
+					system(s);
+				}
+
+				menustate = MENU_MT32PI_CTRL1;
+				break;
+
+			case 4:
+				mt32pi_reversed_stereo ^= 1;
+
+				snprintf(s, sizeof(s),
+					"/sbin/mlinkutil SYSEX "
+					"F0 7D 04 %02X F7",
+					mt32pi_reversed_stereo);
+				system(s);
+
+				menustate = MENU_MT32PI_CTRL1;
+				break;
+
+			case 5:
+				if (select)
+				{
+					system("/sbin/mlinkutil "
+						"SYSEX F0 7D 00 F7");
+
+					menusub = 3;
+					menustate = MENU_UART1;
+				}
 				break;
 			}
 		}
@@ -4265,31 +4501,17 @@ void HandleUI(void)
 		if (parentstate != MENU_MISC1)
 		{
 			for (int i = 0; i < OsdGetSize() - 1; i++) OsdWrite(i, "", 0, 0);
-			flag = 1;
-			for (int i = 1; i < 4; i++) if (FileExists(cfg_get_name(i))) flag |= 1 << i;
-			flag |= altcfg() << 4;
-			menusub = 3;
+			menusub = ini_keep_sub ? 0 : 3;
+			ini_keep_sub = 0;
 		}
 		parentstate = MENU_MISC1;
 
 		OsdWrite(1, "         Information");
 
-		if (menusub != 0) flag = (flag & 0xF) | (altcfg() << 4);
-		strcpy(s, " Config:");
-		m = 0;
-		for (int i = 0; i < 4; i++)
-		{
-			int en = flag & (1 << i);
-			if (i == (flag >> 4) && en) strcat(s, "\xc");
-			strcat(s, " ");
-			if (m) strcat(s, "\xc ");
-			m = (i == (flag >> 4) && en);
-			if (!en) strcat(s, "\xb");
-			strcat(s, cfg_get_label(i));
-			if (!en) strcat(s, "\xb");
-		}
-		strcat(s, " ");
-		if (m) strcat(s, "\xc");
+		snprintf(s, 28, " Config: %s", ini_display_name(altcfg()));
+		for (int i = strlen(s); i < 27; i++) s[i] = ' ';
+		s[27] = 0x16;
+		s[28] = 0;
 		OsdWrite(10, s, menusub == 0);
 
 		m = get_core_volume();
@@ -4324,6 +4546,40 @@ void HandleUI(void)
 		OsdWrite(15, STD_EXIT, menusub == 3, 0, OSD_ARROW_RIGHT);
 		break;
 
+	case MENU_INI_LIST1:
+		helptext_idx = 0;
+		menumask = 0;
+		OsdSetTitle("Config");
+		ini_list_print();
+		menustate = MENU_INI_LIST2;
+		parentstate = menustate;
+		break;
+
+	case MENU_INI_LIST2:
+		if (menu)
+		{
+			ini_keep_sub = 1;
+			menustate = MENU_MISC1;
+			break;
+		}
+
+		if (select)
+		{
+			if (ini_list_num) user_io_set_ini(ini_list[ini_list_sel]);
+			break;
+		}
+
+		if (up) ini_list_move(-1);
+		else if (down) ini_list_move(1);
+		else if (c == KEY_PAGEUP || left) ini_list_move(-OsdGetSize());
+		else if (c == KEY_PAGEDOWN || right) ini_list_move(OsdGetSize());
+		else if (c == KEY_HOME) ini_list_move(-ini_list_num);
+		else if (c == KEY_END) ini_list_move(ini_list_num);
+		else break;
+
+		menustate = MENU_INI_LIST1;
+		break;
+
 	case MENU_MISC2:
 		printSysInfo();
 		if ((select && menusub == 3) || menu)
@@ -4331,24 +4587,10 @@ void HandleUI(void)
 			menustate = MENU_NONE1;
 			break;
 		}
-		else if (menusub == 0 && (right || left || minus || plus || select))
+		else if (menusub == 0 && select)
 		{
-			uint8_t i = flag >> 4;
-			if (select)
-			{
-				user_io_set_ini(i);
-			}
-			else
-			{
-				do
-				{
-					if (right || plus) i = (i + 1) & 3;
-					else i = (i - 1) & 3;
-				} while (!(flag & (1 << i)));
-
-				flag = (flag & 0xF) | (i << 4);
-			}
-			menustate = MENU_MISC1;
+			ini_list_init();
+			menustate = MENU_INI_LIST1;
 		}
 		else if(menusub == 1 && (right || left || minus || plus))
 		{
@@ -5170,7 +5412,7 @@ void HandleUI(void)
 				osd_unlocked = 1;
 				osd_lock_timer = GetTimer(cfg.osd_lock_time * 1000);
 				menustate = MENU_NONE2;
-				menu_key_set(KEY_F12);
+				menu_key_set(KEY_F12 | UPSTROKE); // a release: the next OSD press still reads as one
 			}
 			else
 			{
